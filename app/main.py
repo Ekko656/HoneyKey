@@ -28,6 +28,7 @@ from app.features.attacker_responses import (
     get_fake_secret_list,
     utc_now_iso,
 )
+from app.features.key_metadata import HONEYPOT_KEYS
 from app.features.ip_blocking import (
     init_blocklist_table,
     add_ip_block,
@@ -447,20 +448,31 @@ async def logging_middleware(request: Request, call_next) -> Any:
     auth_header = request.headers.get("authorization")
     auth_present = bool(auth_header)
     token = parse_bearer_token(auth_header)
-    honeypot_key = get_settings().honeypot_key
-    honeypot_key_used = bool(token and honeypot_key and token == honeypot_key)
-    request.state.honeypot_key_used = honeypot_key_used
-    
-    client_ip = request.client.host if request.client else None
 
+    # Check against all honeypot keys (from registry + env)
+    honeypot_key_used = False
+    key_id = None
+    env_key = get_settings().honeypot_key
+
+    if token:
+        # Check env key first
+        if env_key and token == env_key:
+            honeypot_key_used = True
+            key_id = "honeypot"
+        # Check all registered honeypot keys
+        elif token in HONEYPOT_KEYS:
+            honeypot_key_used = True
+            key_id = token  # Use the actual key as ID for tracking
+
+    request.state.honeypot_key_used = honeypot_key_used
+    request.state.key_id = key_id
+
+    client_ip = request.client.host if request.client else None
 
     response = await call_next(request)
     response.headers["x-correlation-id"] = correlation_id
 
     now_iso = utc_now().isoformat()
-    # client_ip already extracted above
-    key_id = "honeypot" if honeypot_key_used else None
-    key_id = "honeypot" if honeypot_key_used else None
     with get_db() as conn:
         incident_id = None
         if honeypot_key_used and client_ip:
@@ -621,7 +633,9 @@ async def analyze_incident(incident_id: int, request: Request) -> AIReportRespon
             (incident_id,),
         ).fetchall()
 
-    prompt = build_enhanced_prompt_from_rows(incident, events, key_value=settings_value.honeypot_key)
+    # Use the actual key_id from the incident (which is the full key value for registered keys)
+    incident_key = incident["key_id"]
+    prompt = build_enhanced_prompt_from_rows(incident, events, key_value=incident_key)
     correlation_id = getattr(request.state, "correlation_id", "unknown")
     response_text = ""
     provider = "gemini"

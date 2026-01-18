@@ -11,7 +11,13 @@ import demo_reset
 
 # Configuration
 BASE_URL = "http://127.0.0.1:8000"
-HONEYPOT_KEY = "acme_live_f93k2jf92jf0s9df"
+
+# Different keys for different attack scenarios
+KEYS = {
+    "script_kiddie": "acme_docker_j4k5l6m7n8o9p0q1",   # GitHub dorking (novice)
+    "sql_injection": "acme_client_m5n6o7p8q9r0s1t2",   # JS source map (intermediate)
+    "slow_recon": "acme_debug_a1b2c3d4e5f6g7h8",       # Log file access (advanced)
+}
 
 # Rich Console Setup
 custom_theme = Theme({
@@ -64,10 +70,12 @@ def run_analysis(incident_id):
         return False
 
 def scenario_script_kiddie():
-    console.print(Panel("Simulating: Script Kiddie (High Noise, Basic curl)", style="bold red"))
+    key = KEYS["script_kiddie"]
+    console.print(Panel(f"Simulating: Script Kiddie (GitHub Dorking)\nKey: {key[:20]}...", style="bold red"))
+    console.print("[dim]Attacker found key in docker-compose.yml on public GitHub repo[/dim]")
     headers = {
         "User-Agent": "curl/7.81.0",
-        "Authorization": f"Bearer {HONEYPOT_KEY}"
+        "Authorization": f"Bearer {key}"
     }
     steps = [
         ("GET", "/v1/projects"),
@@ -89,10 +97,12 @@ def scenario_script_kiddie():
             time.sleep(0.1)
 
 def scenario_sql_injection():
-    console.print(Panel("Simulating: SQL Injection (Malicious Payloads)", style="bold yellow"))
+    key = KEYS["sql_injection"]
+    console.print(Panel(f"Simulating: SQL Injection (JS Source Map Attack)\nKey: {key[:20]}...", style="bold yellow"))
+    console.print("[dim]Attacker extracted key from minified JS bundle via source map[/dim]")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36",
-        "Authorization": f"Bearer {HONEYPOT_KEY}"
+        "Authorization": f"Bearer {key}"
     }
     payloads = ["' OR '1'='1", "admin' --", "UNION SELECT 1, version(), 3"]
     path = "/v1/projects"
@@ -106,10 +116,12 @@ def scenario_sql_injection():
             time.sleep(0.5)
 
 def scenario_slow_recon():
-    console.print(Panel("Simulating: Low & Slow Recon (Stealthy)", style="bold blue"))
+    key = KEYS["slow_recon"]
+    console.print(Panel(f"Simulating: Advanced Recon (Debug Log Compromise)\nKey: {key[:20]}...", style="bold blue"))
+    console.print("[dim]Attacker has server access - extracted key from debug logs[/dim]")
     headers = {
         "User-Agent": "python-requests/2.26.0",
-        "Authorization": f"Bearer {HONEYPOT_KEY}"
+        "Authorization": f"Bearer {key}"
     }
     steps = ["/health", "/v1/projects", "/v1/invalid", "/v1/secrets"]
     with Progress() as progress:
@@ -128,9 +140,10 @@ def main():
     while True:
         console.clear()
         console.print("[header]HoneyKey Attack Simulation Suite[/header]")
-        console.print("1. [Script Kiddie]   Fast, Noisy (Current Demo)")
-        console.print("2. [SQL Injection]   Malicious Payloads")
-        console.print("3. [Low & Slow]      Stealthy Recon")
+        console.print("Each attack uses a DIFFERENT honeypot key from a different leak source:\n")
+        console.print("1. [Script Kiddie]   GitHub Dorking      - docker-compose.yml leak (NOVICE)")
+        console.print("2. [SQL Injection]   Source Map Attack   - JS bundle extraction (INTERMEDIATE)")
+        console.print("3. [Advanced Recon]  Log File Compromise - server debug logs (ADVANCED)")
         console.print("4. Exit")
         
         choice = Prompt.ask("\nSelect Option", choices=["1", "2", "3", "4"], default="1")
