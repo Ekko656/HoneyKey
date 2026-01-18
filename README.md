@@ -28,6 +28,8 @@ The service will auto-create the SQLite database at `./data/honeykey.db`.
 - `GET /incidents`
 - `GET /incidents/{id}`
 - `GET /incidents/{id}/events`
+- `POST /incidents/{id}/analyze`
+- `GET /incidents/{id}/ai-report`
 
 ## Configuration
 
@@ -38,6 +40,8 @@ DATABASE_PATH=./data/honeykey.db
 HONEYPOT_KEY=acme_live_f93k2jf92jf0s9df
 INCIDENT_WINDOW_MINUTES=30
 CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-1.5-pro
 ```
 
 ## Testing
