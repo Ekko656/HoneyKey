@@ -4,9 +4,9 @@ import json
 import os
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generator, List, Optional
+from typing import Any, AsyncGenerator, Generator, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -48,7 +48,15 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 
-app = FastAPI(title="HoneyKey Backend")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    app.state.settings = load_settings()
+    init_db()
+    yield
+
+
+app = FastAPI(title="HoneyKey Backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -120,12 +128,6 @@ def init_db() -> None:
             )
             """
         )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    app.state.settings = load_settings()
-    init_db()
 
 
 class Incident(BaseModel):
