@@ -3,8 +3,11 @@ import json
 import os
 import sqlite3
 import sys
+from pathlib import Path
 
 from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def create_client(tmp_path):
@@ -111,11 +114,9 @@ def test_ai_report_clean_json(tmp_path, monkeypatch):
     response_payload = {
         "incident_id": incident_id,
         "severity": "medium",
-        "confidence_score": 0.8,
         "summary": "Honeypot token used.",
         "evidence": ["Bearer token matched honeypot"],
-        "techniques": ["T1078: Valid Accounts"],
-        "recommended_actions": ["Review source IP"],
+        "recommended_actions": ["HoneyKey: Export JSON report", "You: Review source IP"],
     }
 
     def fake_generate(prompt, api_key, model):
@@ -126,7 +127,6 @@ def test_ai_report_clean_json(tmp_path, monkeypatch):
     response = client.post(f"/incidents/{incident_id}/analyze")
     assert response.status_code == 200
     result = response.json()
-    # Check key fields (response may have extra fields like 'report')
     assert result["incident_id"] == response_payload["incident_id"]
     assert result["severity"] == response_payload["severity"]
     assert result["summary"] == response_payload["summary"]
@@ -183,11 +183,9 @@ def test_ai_report_fenced_json(tmp_path, monkeypatch):
     response_payload = {
         "incident_id": incident_id,
         "severity": "low",
-        "confidence_score": 0.75,
         "summary": "Fenced JSON response handled.",
         "evidence": ["Fenced output"],
-        "techniques": ["T1078: Valid Accounts"],
-        "recommended_actions": ["Monitor for repeats"],
+        "recommended_actions": ["HoneyKey: Preserve evidence", "You: Monitor for repeats"],
     }
 
     def fake_generate(prompt, api_key, model):
@@ -197,7 +195,6 @@ def test_ai_report_fenced_json(tmp_path, monkeypatch):
 
     response = client.post(f"/incidents/{incident_id}/analyze")
     assert response.status_code == 200
-    # Response may include extra fields like 'report', so check subset
     result = response.json()
     assert result["incident_id"] == response_payload["incident_id"]
     assert result["severity"] == response_payload["severity"]

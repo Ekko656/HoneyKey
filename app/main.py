@@ -4,9 +4,9 @@ import json
 import os
 import sqlite3
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Generator, List, Optional
+from typing import Any, Generator, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -67,15 +67,7 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    app.state.settings = load_settings()
-    init_db()
-    yield
-
-
-app = FastAPI(title="HoneyKey Backend", lifespan=lifespan)
+app = FastAPI(title="HoneyKey Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -158,6 +150,12 @@ def init_db() -> None:
         )
 
 
+@app.on_event("startup")
+def on_startup() -> None:
+    app.state.settings = load_settings()
+    init_db()
+
+
 class Incident(BaseModel):
     id: int
     key_id: str
@@ -192,6 +190,9 @@ class AIReportResponse(BaseModel):
     evidence: List[str]
     techniques: List[str]
     recommended_actions: List[str]
+    report: Optional[str] = None
+    techniques: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
 
 
 def utc_now() -> datetime:
@@ -213,38 +214,40 @@ def extract_json_payload(text: str) -> dict:
 
 
 def validate_report_payload(payload: dict, incident_id: int) -> AIReportResponse:
-    expected_keys = {
+    required_keys = {
         "incident_id",
         "severity",
-        "confidence_score",
         "summary",
         "evidence",
-        "techniques",
         "recommended_actions",
     }
-    # Allow extra keys, but ensure required ones are present
-    if not expected_keys.issubset(payload.keys()):
-        missing = expected_keys - set(payload.keys())
-        # Try to patch missing keys with defaults if possible, or raise error
-        # For now, let's be strict but clear
-        raise ValueError(f"Missing JSON keys in report: {missing}")
-        
+    if not required_keys.issubset(set(payload.keys())):
+        missing = required_keys - set(payload.keys())
+        raise ValueError(f"Missing required JSON keys in report: {missing}")
     if not isinstance(payload["incident_id"], int):
         raise ValueError("incident_id must be int")
     if payload["incident_id"] != incident_id:
         raise ValueError("incident_id does not match")
     if not isinstance(payload["severity"], str):
         raise ValueError("severity must be string")
-    if not isinstance(payload.get("confidence_score", 0.0), (int, float)):
-         # weak check, just to be safe
-         payload["confidence_score"] = 0.8
     if not isinstance(payload["summary"], str):
         raise ValueError("summary must be string")
-    if not isinstance(payload["evidence"], list):
-        raise ValueError("evidence must be list")
-    if not isinstance(payload.get("techniques", []), list):
-         payload["techniques"] = []
-    
+    if not isinstance(payload["evidence"], list) or not all(
+        isinstance(item, str) for item in payload["evidence"]
+    ):
+        raise ValueError("evidence must be list of strings")
+    if not isinstance(payload["recommended_actions"], list) or not all(
+        isinstance(item, str) for item in payload["recommended_actions"]
+    ):
+        raise ValueError("recommended_actions must be list of strings")
+    # Optional fields with defaults
+    if "confidence_score" not in payload:
+        payload["confidence_score"] = 0.8
+    if "techniques" not in payload:
+        payload["techniques"] = []
+    if "report" in payload and payload["report"] is not None:
+        if not isinstance(payload["report"], str):
+            raise ValueError("report must be string")
     return AIReportResponse(**payload)
 
 
@@ -254,6 +257,40 @@ def generate_gemini_report(prompt: str, api_key: str, model: str) -> str:
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text or ""
+
+
+def normalize_recommended_actions(actions: List[str]) -> List[str]:
+    normalized = []
+    for action in actions:
+        if action.startswith("HoneyKey:") or action.startswith("You:"):
+            normalized.append(action)
+        elif action.startswith("User:"):
+            normalized.append(action.replace("User:", "You:", 1))
+        else:
+            normalized.append(f"You: {action}")
+    return normalized
+
+
+def build_report_fallback(incident: sqlite3.Row, events: list[sqlite3.Row]) -> str:
+    event_count = len(events)
+    first_ts = events[-1]["ts"] if events else "unknown"
+    last_ts = events[0]["ts"] if events else "unknown"
+    paths = sorted({row["path"] for row in events if row["path"]})[:5]
+    user_agents = sorted({row["user_agent"] for row in events if row["user_agent"]})[:3]
+    return (
+        "Executive Summary: HoneyKey detected use of a honeypot credential tied to this "
+        f"incident. Activity was observed between {first_ts} and {last_ts} with "
+        f"{event_count} related events. Impact appears contained to the honeypot "
+        "environment; HoneyKey did not change external systems. Risk is moderate because "
+        "leaked credentials can signal broader exposure. Next steps require organizational "
+        "review of credential hygiene and access policies.\n\n"
+        "Technical Details: Telemetry shows honeypot key usage with "
+        f"{event_count} events from a single source. Observed window: {first_ts} → {last_ts}. "
+        f"Affected endpoints: {', '.join(paths) if paths else 'unknown'}. "
+        f"User-Agent samples: {', '.join(user_agents) if user_agents else 'unknown'}. "
+        "Likely techniques include credential abuse against protected endpoints; validate "
+        "authorization boundaries and audit related systems outside HoneyKey."
+    )
 
 
 def store_ai_report(
@@ -300,9 +337,23 @@ def build_prompt(incident: sqlite3.Row, events: list[sqlite3.Row]) -> str:
     ]
     return (
         "You are a SOC analyst. Summarize this incident for a report. "
-        "Return ONLY valid JSON. No markdown. No code fences. "
+        "Return ONLY valid JSON (no markdown, no code fences, no extra text). "
         "Required keys: incident_id (int), severity (string), summary (string), "
         "evidence (list of strings), recommended_actions (list of strings). "
+        "Additive keys allowed: report (string), techniques (list of strings), "
+        "confidence_score (number). "
+        "The report must be a single layered narrative with two sections. "
+        "Start with 'Executive Summary:' in plain English (no jargon or raw metrics) "
+        "explaining what happened, impact, whether activity stayed in the honeypot "
+        "environment, why it matters, and what decision-makers should know. "
+        "Then include 'Technical Details:' with concrete evidence and metrics (event counts, "
+        "timing window, burstiness, enumeration patterns, user-agent observations), "
+        "explain attacker behaviors in human-readable terms before optional technique IDs, "
+        "and provide a short timeline. "
+        "Clearly distinguish HoneyKey capabilities (telemetry, grouping, analysis, reports) "
+        "from user actions (blocking IPs, revoking creds, firewall/WAF changes, external SIEMs). "
+        "Never claim HoneyKey performed external actions. "
+        "Each recommended_actions item must be prefixed with 'HoneyKey:' or 'You:'. "
         f"Incident: {json.dumps(incident_payload)}. "
         f"Recent events: {json.dumps(event_payloads)}."
     )
@@ -550,6 +601,16 @@ async def analyze_incident(incident_id: int, request: Request) -> AIReportRespon
         )
         payload = extract_json_payload(response_text)
         report = validate_report_payload(payload, incident_id)
+        report = report.model_copy(
+            update={
+                "recommended_actions": normalize_recommended_actions(
+                    report.recommended_actions
+                )
+            }
+        )
+        if not report.report:
+            report_text = build_report_fallback(incident, events)
+            report = report.model_copy(update={"report": report_text})
     except Exception as exc:
         with get_db() as conn:
             store_ai_report(
