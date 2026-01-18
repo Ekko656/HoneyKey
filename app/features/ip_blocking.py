@@ -222,23 +222,25 @@ def remove_ip_block(
     Returns:
         True if block was removed, False if not found
     """
+    removal_note = f"\nRemoved by {removed_by} at {datetime.now(timezone.utc).isoformat()}"
+
     if block_id:
         result = conn.execute(
             """
             UPDATE ip_blocklist
-            SET status = ?, notes = notes || ?
+            SET status = ?, notes = COALESCE(notes, '') || ?
             WHERE id = ? AND status = 'active'
             """,
-            (BlockStatus.REMOVED.value, f"\nRemoved by {removed_by} at {datetime.now(timezone.utc).isoformat()}", block_id),
+            (BlockStatus.REMOVED.value, removal_note, block_id),
         )
     elif ip_address:
         result = conn.execute(
             """
             UPDATE ip_blocklist
-            SET status = ?, notes = notes || ?
+            SET status = ?, notes = COALESCE(notes, '') || ?
             WHERE ip_address = ? AND status = 'active'
             """,
-            (BlockStatus.REMOVED.value, f"\nRemoved by {removed_by} at {datetime.now(timezone.utc).isoformat()}", ip_address),
+            (BlockStatus.REMOVED.value, removal_note, ip_address),
         )
     else:
         raise ValueError("Either ip_address or block_id required")

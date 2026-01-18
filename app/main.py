@@ -154,6 +154,20 @@ def init_db() -> None:
         init_blocklist_table(conn)
 
 
+@app.middleware("http")
+async def block_ip_middleware(request: Request, call_next):
+    """Block requests from IPs in the blocklist. Returns 403 if IP is blocked."""
+    client_ip = request.client.host if request.client else None
+    if client_ip:
+        with get_db() as conn:
+            if is_ip_blocked(conn, client_ip):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Access denied", "blocked": True}
+                )
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     app.state.settings = load_settings()
@@ -716,6 +730,47 @@ async def block_incident_ip(incident_id: int, request: BlockIPRequestModel) -> B
             message=result.message,
             block=result.block.to_dict() if result.block else None,
         )
+
+
+@app.delete("/incidents/{incident_id}/unblock-ip", response_model=BlockIPResponseModel)
+async def unblock_incident_ip(incident_id: int) -> BlockIPResponseModel:
+    """
+    Unblock the source IP from an incident.
+
+    Called when user clicks "Unblock IP" on an incident report.
+    """
+    with get_db() as conn:
+        incident = conn.execute(
+            "SELECT source_ip FROM incidents WHERE id = ?",
+            (incident_id,)
+        ).fetchone()
+
+        if not incident:
+            return BlockIPResponseModel(success=False, message=f"Incident {incident_id} not found")
+
+        source_ip = incident["source_ip"]
+        success = remove_ip_block(conn, ip_address=source_ip, removed_by="analyst")
+
+        if success:
+            return BlockIPResponseModel(success=True, message=f"Successfully unblocked IP {source_ip}")
+        return BlockIPResponseModel(success=False, message=f"IP {source_ip} is not currently blocked")
+
+
+@app.get("/incidents/{incident_id}/block-status")
+async def get_incident_block_status(incident_id: int) -> dict:
+    """Check if the incident's source IP is currently blocked."""
+    with get_db() as conn:
+        incident = conn.execute(
+            "SELECT source_ip FROM incidents WHERE id = ?", (incident_id,)
+        ).fetchone()
+
+        if not incident:
+            raise HTTPException(status_code=404, detail="Incident not found")
+
+        source_ip = incident["source_ip"]
+        blocked = is_ip_blocked(conn, source_ip)
+
+        return {"incident_id": incident_id, "source_ip": source_ip, "is_blocked": blocked}
 
 
 @app.post("/blocklist", response_model=BlockIPResponseModel)
