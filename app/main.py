@@ -217,7 +217,6 @@ class HealthResponse(BaseModel):
 
 class AIReportResponse(BaseModel):
     incident_id: int
-    title: Optional[str] = None
     severity: str
     confidence_score: float
     summary: str
@@ -225,6 +224,8 @@ class AIReportResponse(BaseModel):
     techniques: List[str]
     recommended_actions: List[str]
     report: Optional[str] = None
+    techniques: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
 
 
 def utc_now() -> datetime:
@@ -277,9 +278,6 @@ def validate_report_payload(payload: dict, incident_id: int) -> AIReportResponse
         payload["confidence_score"] = 0.8
     if "techniques" not in payload:
         payload["techniques"] = []
-    if "title" not in payload or not payload["title"]:
-        # Generate title from summary if AI didn't provide one
-        payload["title"] = payload["summary"][:50] + "..." if len(payload["summary"]) > 50 else payload["summary"]
     if "report" in payload and payload["report"] is not None:
         if not isinstance(payload["report"], str):
             raise ValueError("report must be string")
@@ -664,13 +662,12 @@ async def analyze_incident(incident_id: int, request: Request) -> AIReportRespon
             fallback_text = build_report_fallback(incident, events)
             report = AIReportResponse(
                 incident_id=incident_id,
-                title=f"Suspicious API Activity from {incident['source_ip']}",
                 severity="Medium",
                 confidence_score=1.0,
-                summary="AI generation unavailable. Showing telemetry summary.",
+                summary="AI generation unavailable (Rate Limit/Error). Showing telemetry summary.",
                 evidence=["Deterministic fallback triggered"],
-                techniques=["T1078: Valid Accounts"],
-                recommended_actions=["Review API access logs", "Verify credential status"],
+                techniques=["T1000: Fallback Technique"],
+                recommended_actions=["Check API Quota"],
                 report=fallback_text
             )
 
@@ -1021,12 +1018,22 @@ async def api_list_reports() -> List[ReportListItem]:
             """
         ).fetchall()
 
+        def get_attack_title(key_id: str, source_ip: str) -> str:
+            """Generate descriptive title based on the honeypot key used."""
+            if key_id.startswith("acme_docker"):
+                return f"GitHub Credential Leak - {source_ip}"
+            elif key_id.startswith("acme_client"):
+                return f"Source Map Extraction Attack - {source_ip}"
+            elif key_id.startswith("acme_debug"):
+                return f"Debug Log Compromise - {source_ip}"
+            else:
+                return f"API Key Abuse Detected - {source_ip}"
+
         reports = []
         for inc in incidents:
             # Parse AI report if available
             severity = "medium"
             summary = f"Honeypot key usage detected from {inc['source_ip']}"
-            title = f"Incident #{inc['id']} - {inc['source_ip']}"  # Default title
             status = "new"
 
             if inc["report_json"]:
@@ -1034,8 +1041,6 @@ async def api_list_reports() -> List[ReportListItem]:
                     report_data = json.loads(inc["report_json"])
                     severity = report_data.get("severity", "medium").lower()
                     summary = report_data.get("summary", summary)
-                    # Use AI-generated title if available
-                    title = report_data.get("title", title)
                     status = "reviewed"
                 except:
                     pass
@@ -1043,7 +1048,7 @@ async def api_list_reports() -> List[ReportListItem]:
             reports.append(ReportListItem(
                 id=f"INC-{inc['id']:04d}",
                 incident_id=inc["id"],
-                title=title,
+                title=get_attack_title(inc["key_id"], inc["source_ip"]),
                 generated_date=inc["report_date"] or inc["last_seen"],
                 incident_date=inc["first_seen"],
                 severity=severity,
@@ -1057,11 +1062,10 @@ async def api_list_reports() -> List[ReportListItem]:
 
 
 @app.get("/api/reports/{report_id}")
-async def api_get_report(report_id: str, request: Request) -> dict:
+async def api_get_report(report_id: str) -> dict:
     """
     Get a specific report by ID (format: INC-XXXX).
     Returns full report details including AI analysis.
-    Auto-generates AI report if not already present.
     """
     # Parse incident ID from report ID
     try:
@@ -1110,53 +1114,38 @@ async def api_get_report(report_id: str, request: Request) -> dict:
         # Get block status
         blocked = is_ip_blocked(conn, incident["source_ip"])
 
-    # Check if we have a report, if not auto-generate
-    report_data = None
-    if ai_report and ai_report["report_json"]:
-        try:
-            report_data = json.loads(ai_report["report_json"])
-        except:
-            pass
+        # Build response
+        report_data = None
+        if ai_report and ai_report["report_json"]:
+            try:
+                report_data = json.loads(ai_report["report_json"])
+            except:
+                pass
 
-    # Auto-generate report if not present
-    if report_data is None:
-        try:
-            generated = await analyze_incident(incident_id, request)
-            report_data = generated.model_dump()
-        except Exception as e:
-            # If generation fails, continue without AI report
-            print(f"Auto-generate failed: {e}")
-
-    # Get title from AI report or generate default
-    title = f"Incident #{incident['id']} - {incident['source_ip']}"
-    if report_data and report_data.get("title"):
-        title = report_data["title"]
-
-    return {
-        "id": f"INC-{incident['id']:04d}",
-        "incident_id": incident["id"],
-        "title": title,
-        "source_ip": incident["source_ip"],
-        "key_id": incident["key_id"],
-        "first_seen": incident["first_seen"],
-        "last_seen": incident["last_seen"],
-        "event_count": incident["event_count"],
-        "is_blocked": blocked,
-        "has_ai_report": report_data is not None,
-        "ai_report": report_data,
-        "events": [
-            {
-                "id": e["id"],
-                "timestamp": e["ts"],
-                "ip": e["ip"],
-                "method": e["method"],
-                "path": e["path"],
-                "user_agent": e["user_agent"],
-                "correlation_id": e["correlation_id"],
-            }
-            for e in events
-        ],
-    }
+        return {
+            "id": f"INC-{incident['id']:04d}",
+            "incident_id": incident["id"],
+            "source_ip": incident["source_ip"],
+            "key_id": incident["key_id"],
+            "first_seen": incident["first_seen"],
+            "last_seen": incident["last_seen"],
+            "event_count": incident["event_count"],
+            "is_blocked": blocked,
+            "has_ai_report": report_data is not None,
+            "ai_report": report_data,
+            "events": [
+                {
+                    "id": e["id"],
+                    "timestamp": e["ts"],
+                    "ip": e["ip"],
+                    "method": e["method"],
+                    "path": e["path"],
+                    "user_agent": e["user_agent"],
+                    "correlation_id": e["correlation_id"],
+                }
+                for e in events
+            ],
+        }
 
 
 @app.get("/api/reports/{report_id}/events")
