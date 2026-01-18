@@ -57,11 +57,22 @@ class Settings(BaseModel):
 
 def load_settings() -> Settings:
     load_dotenv()
-    cors_origins = [
+    # Default CORS origins for local development and production
+    default_origins = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "https://honeykey.tech",
+        "https://www.honeykey.tech",
+    ]
+    env_origins = [
         origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
     ]
+    # Combine default and env origins, remove duplicates
+    cors_origins = list(set(default_origins + env_origins))
     settings = Settings(
         database_path=os.getenv("DATABASE_PATH", DEFAULT_DB_PATH),
         honeypot_key=os.getenv("HONEYPOT_KEY", ""),
@@ -73,6 +84,7 @@ def load_settings() -> Settings:
         gemini_model=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
     )
     print(f"DEBUG: Loaded Key: {(settings.gemini_api_key or '')[:10]}... Model: {settings.gemini_model}")
+    print(f"DEBUG: CORS Origins: {cors_origins}")
     return settings
 
 
@@ -83,6 +95,7 @@ app = FastAPI(title="HoneyKey Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or [],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # Allow Vercel preview deployments
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -887,3 +900,280 @@ async def export_blocklist_endpoint(format: str = "plain") -> Any:
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+
+# =============================================================================
+# FRONTEND API COMPATIBILITY ROUTES (/api/*)
+# These routes provide a clean /api/* prefix for frontend integration
+# =============================================================================
+
+class DashboardStats(BaseModel):
+    """Dashboard statistics for the frontend."""
+    active_incidents: int
+    total_incidents: int
+    honeypot_keys_active: int
+    blocked_ips: int
+    last_incident_time: Optional[str]
+
+
+class ReportListItem(BaseModel):
+    """Report list item for frontend."""
+    id: str
+    incident_id: int
+    title: str
+    generated_date: str
+    incident_date: str
+    severity: str
+    status: str
+    event_count: int
+    source_ip: str
+    summary: str
+
+
+@app.get("/api/dashboard/stats", response_model=DashboardStats)
+async def api_dashboard_stats() -> DashboardStats:
+    """Get dashboard statistics for the frontend."""
+    with get_db() as conn:
+        # Count total incidents
+        total = conn.execute("SELECT COUNT(*) as cnt FROM incidents").fetchone()["cnt"]
+
+        # Get most recent incident
+        last_incident = conn.execute(
+            "SELECT last_seen FROM incidents ORDER BY last_seen DESC LIMIT 1"
+        ).fetchone()
+
+        # Count active blocked IPs
+        blocked = conn.execute(
+            "SELECT COUNT(*) as cnt FROM ip_blocklist WHERE status = 'active'"
+        ).fetchone()["cnt"]
+
+        # Count incidents in last 24 hours as "active"
+        yesterday = (utc_now() - timedelta(hours=24)).isoformat()
+        active = conn.execute(
+            "SELECT COUNT(*) as cnt FROM incidents WHERE last_seen >= ?",
+            (yesterday,)
+        ).fetchone()["cnt"]
+
+        return DashboardStats(
+            active_incidents=active,
+            total_incidents=total,
+            honeypot_keys_active=12,  # Configurable in production
+            blocked_ips=blocked,
+            last_incident_time=last_incident["last_seen"] if last_incident else None,
+        )
+
+
+@app.get("/api/reports", response_model=List[ReportListItem])
+async def api_list_reports() -> List[ReportListItem]:
+    """
+    List all incidents as reports for the frontend.
+    Maps incidents to the report format expected by the frontend.
+    """
+    with get_db() as conn:
+        incidents = conn.execute(
+            """
+            SELECT i.id, i.key_id, i.source_ip, i.first_seen, i.last_seen, i.event_count,
+                   ar.report_json, ar.created_at as report_date
+            FROM incidents i
+            LEFT JOIN (
+                SELECT incident_id, report_json, created_at,
+                       ROW_NUMBER() OVER (PARTITION BY incident_id ORDER BY created_at DESC) as rn
+                FROM ai_reports
+                WHERE parse_ok = 1
+            ) ar ON ar.incident_id = i.id AND ar.rn = 1
+            ORDER BY i.last_seen DESC
+            """
+        ).fetchall()
+
+        reports = []
+        for inc in incidents:
+            # Parse AI report if available
+            severity = "medium"
+            summary = f"Honeypot key usage detected from {inc['source_ip']}"
+            status = "new"
+
+            if inc["report_json"]:
+                try:
+                    report_data = json.loads(inc["report_json"])
+                    severity = report_data.get("severity", "medium").lower()
+                    summary = report_data.get("summary", summary)
+                    status = "reviewed"
+                except:
+                    pass
+
+            reports.append(ReportListItem(
+                id=f"INC-{inc['id']:04d}",
+                incident_id=inc["id"],
+                title=f"Honeypot Activity - {inc['source_ip']}",
+                generated_date=inc["report_date"] or inc["last_seen"],
+                incident_date=inc["first_seen"],
+                severity=severity,
+                status=status,
+                event_count=inc["event_count"],
+                source_ip=inc["source_ip"],
+                summary=summary,
+            ))
+
+        return reports
+
+
+@app.get("/api/reports/{report_id}")
+async def api_get_report(report_id: str) -> dict:
+    """
+    Get a specific report by ID (format: INC-XXXX).
+    Returns full report details including AI analysis.
+    """
+    # Parse incident ID from report ID
+    try:
+        incident_id = int(report_id.replace("INC-", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    with get_db() as conn:
+        # Get incident
+        incident = conn.execute(
+            """
+            SELECT id, key_id, source_ip, first_seen, last_seen, event_count
+            FROM incidents WHERE id = ?
+            """,
+            (incident_id,)
+        ).fetchone()
+
+        if not incident:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        # Get AI report if available
+        ai_report = conn.execute(
+            """
+            SELECT report_json, created_at, parse_ok
+            FROM ai_reports
+            WHERE incident_id = ? AND parse_ok = 1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (incident_id,)
+        ).fetchone()
+
+        # Get events
+        events = conn.execute(
+            """
+            SELECT id, ts, ip, method, path, user_agent, correlation_id,
+                   auth_present, honeypot_key_used
+            FROM events
+            WHERE incident_id = ?
+            ORDER BY ts DESC
+            LIMIT 50
+            """,
+            (incident_id,)
+        ).fetchall()
+
+        # Get block status
+        blocked = is_ip_blocked(conn, incident["source_ip"])
+
+        # Build response
+        report_data = None
+        if ai_report and ai_report["report_json"]:
+            try:
+                report_data = json.loads(ai_report["report_json"])
+            except:
+                pass
+
+        return {
+            "id": f"INC-{incident['id']:04d}",
+            "incident_id": incident["id"],
+            "source_ip": incident["source_ip"],
+            "key_id": incident["key_id"],
+            "first_seen": incident["first_seen"],
+            "last_seen": incident["last_seen"],
+            "event_count": incident["event_count"],
+            "is_blocked": blocked,
+            "has_ai_report": report_data is not None,
+            "ai_report": report_data,
+            "events": [
+                {
+                    "id": e["id"],
+                    "timestamp": e["ts"],
+                    "ip": e["ip"],
+                    "method": e["method"],
+                    "path": e["path"],
+                    "user_agent": e["user_agent"],
+                    "correlation_id": e["correlation_id"],
+                }
+                for e in events
+            ],
+        }
+
+
+@app.get("/api/reports/{report_id}/events")
+async def api_get_report_events(report_id: str, limit: int = 50) -> List[dict]:
+    """Get events for a specific report."""
+    try:
+        incident_id = int(report_id.replace("INC-", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    with get_db() as conn:
+        events = conn.execute(
+            """
+            SELECT id, ts, ip, method, path, user_agent, correlation_id,
+                   auth_present, honeypot_key_used
+            FROM events
+            WHERE incident_id = ?
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (incident_id, limit),
+        ).fetchall()
+
+        return [
+            {
+                "id": e["id"],
+                "timestamp": e["ts"],
+                "ip": e["ip"],
+                "method": e["method"],
+                "path": e["path"],
+                "user_agent": e["user_agent"],
+                "correlation_id": e["correlation_id"],
+                "auth_present": bool(e["auth_present"]),
+                "honeypot_key_used": bool(e["honeypot_key_used"]),
+            }
+            for e in events
+        ]
+
+
+@app.post("/api/reports/{report_id}/analyze")
+async def api_analyze_report(report_id: str, request: Request) -> dict:
+    """
+    Trigger AI analysis for a report.
+    This is an alias to the existing /incidents/{id}/analyze endpoint.
+    """
+    try:
+        incident_id = int(report_id.replace("INC-", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    # Use existing analyze function
+    result = await analyze_incident(incident_id, request)
+    return result.model_dump()
+
+
+@app.post("/api/reports/{report_id}/block-ip")
+async def api_block_report_ip(report_id: str, request: BlockIPRequestModel) -> BlockIPResponseModel:
+    """Block the IP associated with a report."""
+    try:
+        incident_id = int(report_id.replace("INC-", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    return await block_incident_ip(incident_id, request)
+
+
+@app.delete("/api/reports/{report_id}/unblock-ip")
+async def api_unblock_report_ip(report_id: str) -> BlockIPResponseModel:
+    """Unblock the IP associated with a report."""
+    try:
+        incident_id = int(report_id.replace("INC-", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    return await unblock_incident_ip(incident_id)
