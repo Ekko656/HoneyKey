@@ -266,6 +266,7 @@ Based on OBSERVED BEHAVIOR (not key identity), the following MITRE ATT&CK techni
 Generate a JSON report with this exact structure:
 {{
     "incident_id": {incident_id},
+    "title": "Short unique title describing the attack (e.g. 'Automated API Reconnaissance' or 'Credential Stuffing Attempt')",
     "severity": "Low|Medium|High|Critical",
     "confidence_score": 0.0-1.0,
     "summary": "2-3 sentence executive summary",
@@ -275,6 +276,7 @@ Generate a JSON report with this exact structure:
 }}
 
 Rules:
+- title should be a unique, descriptive name for THIS specific attack based on observed behavior (NOT generic like "Honeypot Activity")
 - severity should match the behavioral risk level
 - confidence_score should reflect certainty in the attribution (float)
 - evidence should cite SPECIFIC behavioral observations
