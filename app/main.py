@@ -160,8 +160,9 @@ class AIReportResponse(BaseModel):
     summary: str
     evidence: List[str]
     recommended_actions: List[str]
-    executive_report: Optional[str] = None
-    technical_report: Optional[str] = None
+    report: Optional[str] = None
+    techniques: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
 
 
 def utc_now() -> datetime:
@@ -208,12 +209,17 @@ def validate_report_payload(payload: dict, incident_id: int) -> AIReportResponse
         isinstance(item, str) for item in payload["recommended_actions"]
     ):
         raise ValueError("recommended_actions must be list of strings")
-    if "executive_report" in payload and payload["executive_report"] is not None:
-        if not isinstance(payload["executive_report"], str):
-            raise ValueError("executive_report must be string")
-    if "technical_report" in payload and payload["technical_report"] is not None:
-        if not isinstance(payload["technical_report"], str):
-            raise ValueError("technical_report must be string")
+    if "report" in payload and payload["report"] is not None:
+        if not isinstance(payload["report"], str):
+            raise ValueError("report must be string")
+    if "techniques" in payload and payload["techniques"] is not None:
+        if not isinstance(payload["techniques"], list) or not all(
+            isinstance(item, str) for item in payload["techniques"]
+        ):
+            raise ValueError("techniques must be list of strings")
+    if "confidence_score" in payload and payload["confidence_score"] is not None:
+        if not isinstance(payload["confidence_score"], (int, float)):
+            raise ValueError("confidence_score must be number")
     return AIReportResponse(**payload)
 
 
@@ -237,47 +243,26 @@ def normalize_recommended_actions(actions: List[str]) -> List[str]:
     return normalized
 
 
-def normalize_report_labels(executive: Optional[str], technical: Optional[str]) -> tuple[str, str]:
-    executive_text = (executive or "").strip()
-    technical_text = (technical or "").strip()
-    if executive_text and not executive_text.lower().startswith("executive report"):
-        executive_text = f"Executive Report: {executive_text}"
-    if technical_text and not technical_text.lower().startswith("technical report"):
-        technical_text = f"Technical Report: {technical_text}"
-    return executive_text, technical_text
-
-
-def reports_are_similar(executive: str, technical: str) -> bool:
-    exec_norm = " ".join(executive.lower().split())
-    tech_norm = " ".join(technical.lower().split())
-    return exec_norm == tech_norm or exec_norm in tech_norm or tech_norm in exec_norm
-
-
-def build_report_fallback(incident: sqlite3.Row, events: list[sqlite3.Row]) -> tuple[str, str]:
+def build_report_fallback(incident: sqlite3.Row, events: list[sqlite3.Row]) -> str:
     event_count = len(events)
     first_ts = events[-1]["ts"] if events else "unknown"
     last_ts = events[0]["ts"] if events else "unknown"
     paths = sorted({row["path"] for row in events if row["path"]})[:5]
     user_agents = sorted({row["user_agent"] for row in events if row["user_agent"]})[:3]
-    executive = (
-        "Executive Report: HoneyKey detected use of a honeypot credential tied to this "
+    return (
+        "Executive Summary: HoneyKey detected use of a honeypot credential tied to this "
         f"incident. Activity was observed between {first_ts} and {last_ts} with "
         f"{event_count} related events. Impact appears contained to the honeypot "
-        "environment; no external systems were modified by HoneyKey. Risk is moderate "
-        "because leaked credentials can indicate broader exposure. HoneyKey provides "
-        "telemetry, incident grouping, and a report; leadership should ensure owners "
-        "review access hygiene and confirm no real credentials were exposed."
-    )
-    technical = (
-        "Technical Report: Incident telemetry shows honeypot key usage with "
+        "environment; HoneyKey did not change external systems. Risk is moderate because "
+        "leaked credentials can signal broader exposure. Next steps require organizational "
+        "review of credential hygiene and access policies.\n\n"
+        "Technical Details: Telemetry shows honeypot key usage with "
         f"{event_count} events from a single source. Observed window: {first_ts} → {last_ts}. "
         f"Affected endpoints: {', '.join(paths) if paths else 'unknown'}. "
         f"User-Agent samples: {', '.join(user_agents) if user_agents else 'unknown'}. "
-        "Likely techniques include credential abuse against protected endpoints; confirm "
-        "authorization boundaries and audit external systems. HoneyKey does not block IPs "
-        "or change perimeter controls."
+        "Likely techniques include credential abuse against protected endpoints; validate "
+        "authorization boundaries and audit related systems outside HoneyKey."
     )
-    return executive, technical
 
 
 def store_ai_report(
@@ -327,16 +312,16 @@ def build_prompt(incident: sqlite3.Row, events: list[sqlite3.Row]) -> str:
         "Return ONLY valid JSON (no markdown, no code fences, no extra text). "
         "Required keys: incident_id (int), severity (string), summary (string), "
         "evidence (list of strings), recommended_actions (list of strings). "
-        "Additive keys allowed: executive_report (string), technical_report (string). "
-        "The executive_report must be titled 'Executive Report:' and be plain-English, "
-        "decision-oriented, explain impact/risk, likelihood, business relevance, and "
-        "state whether activity stayed within the honeypot environment. "
-        "The technical_report must be titled 'Technical Report:' and include concrete "
-        "evidence, metrics (event counts, timing window, burstiness, enumeration patterns, "
-        "user-agent observations), inferred techniques with brief explanations, and a "
-        "short timeline. Both reports must be consistent with each other and the evidence. "
-        "Avoid MITRE IDs in the executive report; mention that a technical appendix exists. "
-        "Include MITRE technique IDs in the technical report when possible. "
+        "Additive keys allowed: report (string), techniques (list of strings), "
+        "confidence_score (number). "
+        "The report must be a single layered narrative with two sections. "
+        "Start with 'Executive Summary:' in plain English (no jargon or raw metrics) "
+        "explaining what happened, impact, whether activity stayed in the honeypot "
+        "environment, why it matters, and what decision-makers should know. "
+        "Then include 'Technical Details:' with concrete evidence and metrics (event counts, "
+        "timing window, burstiness, enumeration patterns, user-agent observations), "
+        "explain attacker behaviors in human-readable terms before optional technique IDs, "
+        "and provide a short timeline. "
         "Clearly distinguish HoneyKey capabilities (telemetry, grouping, analysis, reports) "
         "from user actions (blocking IPs, revoking creds, firewall/WAF changes, external SIEMs). "
         "Never claim HoneyKey performed external actions. "
@@ -562,19 +547,9 @@ async def analyze_incident(incident_id: int, request: Request) -> AIReportRespon
                 )
             }
         )
-        executive_report, technical_report = normalize_report_labels(
-            report.executive_report, report.technical_report
-        )
-        if not executive_report or not technical_report or reports_are_similar(
-            executive_report, technical_report
-        ):
-            executive_report, technical_report = build_report_fallback(incident, events)
-        report = report.model_copy(
-            update={
-                "executive_report": executive_report,
-                "technical_report": technical_report,
-            }
-        )
+        if not report.report:
+            report_text = build_report_fallback(incident, events)
+            report = report.model_copy(update={"report": report_text})
     except Exception as exc:
         with get_db() as conn:
             store_ai_report(

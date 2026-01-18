@@ -113,8 +113,9 @@ def test_ai_report_clean_json(tmp_path, monkeypatch):
         "summary": "Honeypot token used.",
         "evidence": ["Bearer token matched honeypot"],
         "recommended_actions": ["HoneyKey: Export JSON report", "You: Review source IP"],
-        "executive_report": "Executive Report: A honeypot credential was used.",
-        "technical_report": "Technical Report: Observed bearer token usage.",
+        "report": "Executive Summary: A honeypot credential was used.\n\nTechnical Details: Observed bearer token usage.",
+        "techniques": None,
+        "confidence_score": None,
     }
 
     def fake_generate(prompt, api_key, model):
@@ -126,10 +127,10 @@ def test_ai_report_clean_json(tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body == response_payload
-    assert body["executive_report"] != body["technical_report"]
     assert "HoneyKey:" in " ".join(body["recommended_actions"])
     assert "You:" in " ".join(body["recommended_actions"])
-    assert "blocked" not in body["executive_report"].lower()
+    assert body["report"].startswith("Executive Summary:")
+    assert "blocked" not in body["report"].lower()
 
     fetch = client.get(f"/incidents/{incident_id}/ai-report")
     assert fetch.status_code == 200
@@ -185,8 +186,9 @@ def test_ai_report_fenced_json(tmp_path, monkeypatch):
         "summary": "Fenced JSON response handled.",
         "evidence": ["Fenced output"],
         "recommended_actions": ["HoneyKey: Preserve evidence", "You: Monitor for repeats"],
-        "executive_report": "Executive Report: Fenced JSON parsed.",
-        "technical_report": "Technical Report: Parser stripped code fences.",
+        "report": "Executive Summary: Fenced JSON parsed.\n\nTechnical Details: Parser stripped code fences.",
+        "techniques": None,
+        "confidence_score": None,
     }
 
     def fake_generate(prompt, api_key, model):
@@ -198,6 +200,5 @@ def test_ai_report_fenced_json(tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body == response_payload
-    assert body["executive_report"] != body["technical_report"]
-    assert body["executive_report"].startswith("Executive Report:")
-    assert body["technical_report"].startswith("Technical Report:")
+    assert body["report"].startswith("Executive Summary:")
+    assert "Technical Details:" in body["report"]
