@@ -1,8 +1,8 @@
-# HoneyKey Backend                                                                                                                       
-  Minimal FastAPI backend for the HoneyKey hackathon demo. It logs suspicious traffic and groups honeypot key usage into incidents.     
-  
-  ## Quickstart
+# HoneyKey Backend                                                                                                                    
 
+  Minimal FastAPI backend for the HoneyKey hackathon demo. It logs suspicious traffic and groups honeypot key usage into incidents.        
+  ## Quickstart                                                                                                                         
+  
   ```bash
   python -m venv .venv
   source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -12,51 +12,85 @@
 
   The service will auto-create the SQLite database at ./data/honeykey.db.
 
+  ---
   Endpoints
 
   Health
+  ┌────────┬──────────┬────────────────────┐
+  │ Method │ Endpoint │      Response      │
+  ├────────┼──────────┼────────────────────┤
+  │ GET    │ /health  │ { "status": "ok" } │
+  └────────┴──────────┴────────────────────┘
+  Trap Endpoints
 
-  - GET /health → { "status": "ok" }
-
-  Trap endpoints (return fake data when honeypot key is used)
-
-  - GET /v1/projects
-  - GET /v1/secrets
-  - POST /v1/auth/verify
-
-  Analyst endpoints
-
-  - GET /incidents
-  - GET /incidents/{id}
-  - GET /incidents/{id}/events
-  - POST /incidents/{id}/analyze
-  - GET /incidents/{id}/ai-report
-
+  Returns fake data when honeypot key is used, otherwise 401.
+  ┌────────┬─────────────────┐
+  │ Method │    Endpoint     │
+  ├────────┼─────────────────┤
+  │ GET    │ /v1/projects    │
+  ├────────┼─────────────────┤
+  │ GET    │ /v1/secrets     │
+  ├────────┼─────────────────┤
+  │ POST   │ /v1/auth/verify │
+  └────────┴─────────────────┘
+  Analyst Endpoints
+  ┌────────┬───────────────────────────┬────────────────────────┐
+  │ Method │         Endpoint          │      Description       │
+  ├────────┼───────────────────────────┼────────────────────────┤
+  │ GET    │ /incidents                │ List all incidents     │
+  ├────────┼───────────────────────────┼────────────────────────┤
+  │ GET    │ /incidents/{id}           │ Get incident details   │
+  ├────────┼───────────────────────────┼────────────────────────┤
+  │ GET    │ /incidents/{id}/events    │ Get incident events    │
+  ├────────┼───────────────────────────┼────────────────────────┤
+  │ POST   │ /incidents/{id}/analyze   │ Generate AI report     │
+  ├────────┼───────────────────────────┼────────────────────────┤
+  │ GET    │ /incidents/{id}/ai-report │ Retrieve cached report │
+  └────────┴───────────────────────────┴────────────────────────┘
   IP Blocking
-
-  - POST /incidents/{id}/block-ip
-  - DELETE /incidents/{id}/unblock-ip
-  - GET /blocklist
-  - GET /blocklist/export?format=nginx
-
+  ┌────────┬────────────────────────────────┬──────────────────────────┐
+  │ Method │            Endpoint            │       Description        │
+  ├────────┼────────────────────────────────┼──────────────────────────┤
+  │ POST   │ /incidents/{id}/block-ip       │ Block incident source IP │
+  ├────────┼────────────────────────────────┼──────────────────────────┤
+  │ DELETE │ /incidents/{id}/unblock-ip     │ Unblock IP               │
+  ├────────┼────────────────────────────────┼──────────────────────────┤
+  │ GET    │ /blocklist                     │ List blocked IPs         │
+  ├────────┼────────────────────────────────┼──────────────────────────┤
+  │ GET    │ /blocklist/export?format=nginx │ Export for firewall      │
+  └────────┴────────────────────────────────┴──────────────────────────┘
   Frontend API
-
-  - GET /api/dashboard/stats
-  - GET /api/reports
-  - GET /api/reports/{id}
-  - POST /api/reports/{id}/analyze
-
+  ┌────────┬───────────────────────────┬───────────────────────────┐
+  │ Method │         Endpoint          │        Description        │
+  ├────────┼───────────────────────────┼───────────────────────────┤
+  │ GET    │ /api/dashboard/stats      │ Dashboard metrics         │
+  ├────────┼───────────────────────────┼───────────────────────────┤
+  │ GET    │ /api/reports              │ List incidents as reports │
+  ├────────┼───────────────────────────┼───────────────────────────┤
+  │ GET    │ /api/reports/{id}         │ Full report with events   │
+  ├────────┼───────────────────────────┼───────────────────────────┤
+  │ POST   │ /api/reports/{id}/analyze │ Trigger AI analysis       │
+  └────────┴───────────────────────────┴───────────────────────────┘
+  ---
   Configuration
 
   Set values via environment variables or .env:
-
-  DATABASE_PATH=./data/honeykey.db
-  HONEYPOT_KEY=acme_live_f93k2jf92jf0s9df
-  INCIDENT_WINDOW_MINUTES=30
-  CORS_ORIGINS=http://localhost:5173,http://localhost:3000
-  GEMINI_API_KEY=
-  GEMINI_MODEL=gemini-1.5-pro
-
+  ┌─────────────────────────┬────────────────────┬─────────────────────────────────────────────────┐
+  │        Variable         │      Default       │                   Description                   │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ DATABASE_PATH           │ ./data/honeykey.db │ SQLite database location                        │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ HONEYPOT_KEY            │ -                  │ Legacy single-key support                       │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ INCIDENT_WINDOW_MINUTES │ 30                 │ Time window for grouping events                 │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ CORS_ORIGINS            │ -                  │ Comma-separated allowed origins                 │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ GEMINI_API_KEY          │ -                  │ Google Gemini API key (required for AI reports) │
+  ├─────────────────────────┼────────────────────┼─────────────────────────────────────────────────┤
+  │ GEMINI_MODEL            │ gemini-1.5-pro     │ Model for report generation                     │
+  └─────────────────────────┴────────────────────┴─────────────────────────────────────────────────┘
+  ---
   Demo Honeypot Keys
   ┌──────────────────────────────┬────────────────────────────────────────────────────┐
   │             Key              │                  Attack Scenario                   │
@@ -67,6 +101,7 @@
   ├──────────────────────────────┼────────────────────────────────────────────────────┤
   │ acme_debug_a1b2c3d4e5f6g7h8  │ Debug log exposure (leaked in logs)                │
   └──────────────────────────────┴────────────────────────────────────────────────────┘
+  ---
   Testing the Honeypot
 
   PowerShell (Windows)
@@ -154,6 +189,7 @@
   curl -s -X POST "http://localhost:8000/incidents/$ID/analyze"
   echo "Success: Report ready on dashboard."
 
+  ---
   Unit Tests
 
   pytest
